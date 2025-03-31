@@ -1,42 +1,51 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <string.h>
+
 
 #define INTERVALS 5   // Počet intervalů histogramu
 #define MAX_LIGHT 255 // Maximální hodnota jasu
-#define MIN_LIGHT 0 
+#define MIN_LIGHT 0  // Minimální hodnota jasu
 
-// Funkce pro aplikaci konvoluční masky na vstupní obraz
 void apply_kernel(const unsigned char *input, unsigned char *output, int width, int height) {
-    int kernel[3][3] = {
+    static const int kernel[3][3] = {
         {  0, -1,  0 },
         { -1,  5, -1 },
         {  0, -1,  0 }
     };
 
-    // Optimalizovaná práce s pamětí: použijeme pointery a výpočet indexů předem
-    for (int ydx = 0; ydx < height; ydx++) {
-        for (int idx = 0; idx < width; idx++) {
-            for (int idc = 0; idc < 3; idc++) { // Pro každý barevný kanál (R, G, B)
-                if (idx == 0 || idx == width - 1 || ydx == 0 || ydx == height - 1) {
-                    // Okrajový pixel se pouze překopíruje
-                    output[(ydx * width + idx) * 3 + idc] = input[(ydx * width + idx) * 3 + idc];
-                } 
-                
-                else {
-                    int new_value = 0;
+    unsigned char *row_buffer[3];
+    for (int i = 0; i < 3; i++) {
+        row_buffer[i] = (unsigned char *)malloc(width * 3 * sizeof(unsigned char));
+    }
 
-                    // Konvoluce 3x3
+    // Preload the first two rows
+    memcpy(row_buffer[0], input, width * 3);
+    memcpy(row_buffer[1], input + width * 3, width * 3);
+
+    for (int ydx = 0; ydx < height; ydx++) {
+        if (ydx < height - 1) {
+            memcpy(row_buffer[2], input + (ydx + 1) * width * 3, width * 3);
+        } else {
+            memcpy(row_buffer[2], row_buffer[1], width * 3); // Repeat last row to avoid OOB
+        }
+
+        for (int idx = 0; idx < width; idx++) {
+            for (int idc = 0; idc < 3; idc++) { // RGB channels
+                if (idx == 0 || idx == width - 1 || ydx == 0 || ydx == height - 1) {
+                    // Copy edge pixels directly
+                    output[(ydx * width + idx) * 3 + idc] = input[(ydx * width + idx) * 3 + idc];
+                } else {
+                    int new_value = 0;
                     for (int ky = -1; ky <= 1; ky++) {
                         for (int kx = -1; kx <= 1; kx++) {
-                            int pixel_x = idx + kx;
-                            int pixel_y = ydx + ky;
-                            int index = (pixel_y * width + pixel_x) * 3 + idc;
-                            new_value += input[index] * kernel[ky + 1][kx + 1];
+                            int pixel_index = (idx + kx) * 3 + idc;
+                            new_value += row_buffer[ky + 1][pixel_index] * kernel[ky + 1][kx + 1];
                         }
                     }
 
-                    // Clamping hodnot na rozsah [0,255]
+                    // Clamping to valid range
                     if (new_value < MIN_LIGHT) new_value = MIN_LIGHT;
                     if (new_value > MAX_LIGHT) new_value = MAX_LIGHT;
 
@@ -44,24 +53,32 @@ void apply_kernel(const unsigned char *input, unsigned char *output, int width, 
                 }
             }
         }
+
+        // Rotate row buffers instead of memcpy
+        unsigned char *temp = row_buffer[0];
+        row_buffer[0] = row_buffer[1];
+        row_buffer[1] = row_buffer[2];
+        row_buffer[2] = temp;
+    }
+
+    for (int i = 0; i < 3; i++) {
+        free(row_buffer[i]);
     }
 }
 
 // Funkce pro výpočet histogramu ve stupních šedi
 void compute_histogram(const unsigned char *image, int width, int height, int *histogram) {
-    for (int idx = 0; idx < INTERVALS; idx++) {
-        histogram[idx] = 0;
+    for (int i = 0; i < INTERVALS; i++) {
+        histogram[i] = 0;
     }
 
-    // Procházení všech pixelů a konverze do stupňů šedi
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
             int idx = (y * width + x) * 3;
             int gray = round(0.2126 * image[idx] + 0.7152 * image[idx + 1] + 0.0722 * image[idx + 2]);
 
-            // Určení intervalu histogramu
-            int bin = gray / (MAX_LIGHT / INTERVALS);
-            if (bin >= INTERVALS) bin = INTERVALS - 1; // Poslední interval je zprava uzavřený
+            int bin = (gray * INTERVALS) / (MAX_LIGHT + 1);
+            if (bin >= INTERVALS) bin = INTERVALS - 1;
 
             histogram[bin]++;
         }
@@ -70,7 +87,7 @@ void compute_histogram(const unsigned char *image, int width, int height, int *h
 
 // Funkce pro uložení histogramu do souboru
 void save_histogram(const int *histogram) {
-    FILE *file = fopen("histogram.txt", "w");
+    FILE *file = fopen("output.txt", "w");
 
     if (!file) {
         perror("Chyba při vytváření souboru histogram.txt");
@@ -106,10 +123,10 @@ void read_file(char *filename) {
 
     fgetc(img_file); // Přeskočení jednoho znaku (newline)
 
-    printf("Formát: %s\n", magic);
-    printf("Šířka: %d\n", width);
-    printf("Výška: %d\n", height);
-    printf("Maxval: %d\n", maxval);
+    // printf("Formát: %s\n", magic);
+    // printf("Šířka: %d\n", width);
+    // printf("Výška: %d\n", height);
+    // printf("Maxval: %d\n", maxval);
 
     // Alokace paměti pro obrázek
     unsigned char *valuesOfImg = malloc(width * height * 3);
@@ -157,8 +174,8 @@ void read_file(char *filename) {
     fwrite(outputImg, 1, width * height * 3, output_file);
     fclose(output_file);
 
-    printf("Zaostřený obrázek uložen jako output.ppm\n");
-    printf("Histogram uložen jako histogram.txt\n");
+    // printf("Zaostřený obrázek uložen jako output.ppm\n");
+    // printf("Histogram uložen jako histogram.txt\n");
 
     // Uvolnění paměti
     free(valuesOfImg);
